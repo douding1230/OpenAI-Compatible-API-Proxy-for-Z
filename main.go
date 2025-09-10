@@ -8,40 +8,66 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os" // 新增导入
 	"regexp"
 	"strings"
 	"time"
 )
 
-// 配置常量
-const (
-	UpstreamUrl       = "https://chat.z.ai/api/chat/completions"
-	DefaultKey        = "sk-tbkFoKzk9a531YyUNNF5"                                                                                                                                                                                                            // 下游客户端鉴权key
-	UpstreamToken     = "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjMxNmJjYjQ4LWZmMmYtNGExNS04NTNkLWYyYTI5YjY3ZmYwZiIsImVtYWlsIjoiR3Vlc3QtMTc1NTg0ODU4ODc4OEBndWVzdC5jb20ifQ.PktllDySS3trlyuFpTeIZf-7hl8Qu1qYF3BxjgIul0BrNux2nX9hVzIjthLXKMWAf9V0qM8Vm_iyDqkjPGsaiQ" // 上游API的token（回退用）
-	DefaultModelName  = "GLM-4.5"
-	ThinkingModelName = "GLM-4.5-Thinking"
-	SearchModelName   = "GLM-4.5-Search"
-	Port              = ":8080"
-	DebugMode         = true // debug模式开关
+// 全局配置变量，由 initConfig 初始化
+var (
+	UpstreamUrl       string
+	DefaultKey        string
+	UpstreamToken     string
+	DefaultModelName  string
+	ThinkingModelName string
+	SearchModelName   string
+	Port              string
+	DebugMode         bool
 )
 
-// ThinkTagsMode 思考内容处理策略
+// 不变的常量
 const (
+	// ThinkTagsMode 思考内容处理策略
 	ThinkTagsMode = "think" // strip: 去除<details>标签；think: 转为<think>标签；raw: 保留原样
-)
 
-// 伪装前端头部（来自抓包）
-const (
+	// 伪装前端头部（来自抓包）
 	XFeVersion  = "prod-fe-1.0.70"
 	BrowserUa   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36 Edg/139.0.0.0"
 	SecChUa     = "\"Not;A=Brand\";v=\"99\", \"Microsoft Edge\";v=\"139\", \"Chromium\";v=\"139\""
 	SecChUaMob  = "?0"
 	SecChUaPlat = "\"Windows\""
 	OriginBase  = "https://chat.z.ai"
+
+	// AnonTokenEnabled 匿名token开关
+	AnonTokenEnabled = true
 )
 
-// AnonTokenEnabled 匿名token开关
-const AnonTokenEnabled = true
+// 获取环境变量，如果不存在则返回默认值
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+// 初始化配置，从环境变量加载
+func initConfig() {
+	UpstreamUrl = getEnv("UPSTREAM_URL", "https://chat.z.ai/api/chat/completions")
+	DefaultKey = getEnv("DEFAULT_KEY", "sk-tbkFoKzk9a531YyUNNF5")
+	UpstreamToken = getEnv("UPSTREAM_TOKEN", "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjMxNmJjYjQ4LWZmMmYtNGExNS04NTNkLWYyYTI5YjY3ZmYwZiIsImVtYWlsIjoiR3Vlc3QtMTc1NTg0ODU4ODc4OEBndWVzdC5jb20ifQ.PktllDySS3trlyuFpTeIZf-7hl8Qu1qYF3BxjgIul0BrNux2nX9hVzIjthLXKMWAf9V0qM8Vm_iyDqkjPGsaiQ")
+	DefaultModelName = getEnv("DEFAULT_MODEL_NAME", "GLM-4.5")
+	ThinkingModelName = getEnv("THINKING_MODEL_NAME", "GLM-4.5-Thinking")
+	SearchModelName = getEnv("SEARCH_MODEL_NAME", "GLM-4.5-Search")
+	Port = getEnv("PORT", "8080")
+
+	// 处理PORT格式，确保有冒号前缀
+	if !strings.HasPrefix(Port, ":") {
+		Port = ":" + Port
+	}
+
+	DebugMode = getEnv("DEBUG_MODE", "true") == "true"
+}
 
 // OpenAIRequest OpenAI 请求结构
 type OpenAIRequest struct {
@@ -113,19 +139,19 @@ type Usage struct {
 
 // UpstreamData 上游SSE响应结构
 type UpstreamData struct {
-    Type string `json:"type"`
-    Data struct {
-        DeltaContent string         `json:"delta_content"`
-        EditContent  string         `json:"edit_content"`
-        Phase        string         `json:"phase"`
-        Done         bool           `json:"done"`
-        Usage        Usage          `json:"usage,omitempty"`
-        Error        *UpstreamError `json:"error,omitempty"`
-        Inner        *struct {
-            Error *UpstreamError `json:"error,omitempty"`
-        } `json:"data,omitempty"`
-    } `json:"data"`
-    Error *UpstreamError `json:"error,omitempty"`
+	Type string `json:"type"`
+	Data struct {
+		DeltaContent string         `json:"delta_content"`
+		EditContent  string         `json:"edit_content"`
+		Phase        string         `json:"phase"`
+		Done         bool           `json:"done"`
+		Usage        Usage          `json:"usage,omitempty"`
+		Error        *UpstreamError `json:"error,omitempty"`
+		Inner        *struct {
+			Error *UpstreamError `json:"error,omitempty"`
+		} `json:"data,omitempty"`
+	} `json:"data"`
+	Error *UpstreamError `json:"error,omitempty"`
 }
 
 // UpstreamError 上游错误结构
@@ -194,12 +220,14 @@ func getAnonymousToken() (string, error) {
 }
 
 func main() {
+	initConfig() // 在程序启动时加载配置
+
 	http.HandleFunc("/v1/models", handleModels)
 	http.HandleFunc("/v1/chat/completions", handleChatCompletions)
 	http.HandleFunc("/", handleOptions)
 
 	log.Printf("OpenAI兼容API服务器启动在端口%s", Port)
-	log.Printf("模型: %s", DebugMode)
+	log.Printf("默认模型: %s", DefaultModelName)
 	log.Printf("上游: %s", UpstreamUrl)
 	log.Printf("Debug模式: %v", DebugMode)
 	log.Fatal(http.ListenAndServe(Port, nil))
